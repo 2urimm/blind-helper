@@ -1,0 +1,26 @@
+*.iml
+.gradle
+.kotlin
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+# 민감 정보 (절대 올리면 안 됨)
+local.properties
+*.keystore
+*.jks
+
+# Android 빌드 산출물
+.gradle/
+build/
+.idea/
+*.iml
+.cxx/
+
+# OS
+.DS_Store
+Thumbs.db
