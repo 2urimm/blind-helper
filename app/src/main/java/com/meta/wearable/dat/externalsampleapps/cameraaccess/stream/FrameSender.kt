@@ -23,7 +23,14 @@ class FrameSender(private val serverUrl: String) {
         private const val JPEG_QUALITY = 60   // 낮을수록 대역폭 적게 먹음 (40~70 조절)
         private const val MAX_QUEUE_BYTES = 50_000L  // 송신 버퍼가 이 크기 넘으면 프레임 버림
     }
+    // 구간 측정용
+    @Volatile private var sentAtMs = 0L
+    private var netCount = 0
+    private var netSumRtt = 0.0
+    private var netSumServer = 0.0
+    private var lastNetLogMs = 0L
 
+    @Volatile private var lastEncodeMs = 0L
     private val client = OkHttpClient()
     private var webSocket: WebSocket? = null
     private val connected = AtomicBoolean(false)
@@ -39,8 +46,27 @@ class FrameSender(private val serverUrl: String) {
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
-                // 서버가 돌려준 탐지 결과 JSON (지금은 로그만; 2단계 오버레이용)
-                Log.d(TAG, "서버 응답: $text")
+                val rtt = System.currentTimeMillis() - sentAtMs
+                // 서버가 보낸 server_ms 파싱 (간단 파싱)
+                val serverMs = Regex("\"server_ms\":\\s*([0-9.]+)")
+                    .find(text)?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
+                val network = rtt - serverMs
+
+                netCount++
+                netSumRtt += rtt
+                netSumServer += serverMs
+                val now = System.currentTimeMillis()
+                if (lastNetLogMs == 0L) lastNetLogMs = now
+                if (now - lastNetLogMs >= 1000) {
+                    val avgRtt = netSumRtt / netCount
+                    val avgServer = netSumServer / netCount
+                    val avgNet = avgRtt - avgServer
+                    Log.d("NET_METRICS",
+                        "rtt=${"%.0f".format(avgRtt)}ms  server=${"%.0f".format(avgServer)}ms  " +
+                                "network=${"%.0f".format(avgNet)}ms  encode=${lastEncodeMs}ms  → 병목:${if (avgNet > avgServer) "네트워크" else "서버추론"}")
+                    netCount = 0; netSumRtt = 0.0; netSumServer = 0.0
+                    lastNetLogMs = now
+                }
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: okhttp3.Response?) {
@@ -82,6 +108,24 @@ class FrameSender(private val serverUrl: String) {
         }
         try {
             ws.send(jpeg.toByteString())
+        } catch (e: Exception) {
+            Log.e(TAG, "전송 에러: ${e.message}")
+        }
+    }
+
+    /** 비트맵을 JPEG로 압축해 전송 (서버 모드용). queueSize로 밀림 방지. */
+    fun sendFrameForMetrics(bitmap: android.graphics.Bitmap) {
+        if (!connected.get()) return
+        val ws = webSocket ?: return
+        if (ws.queueSize() > MAX_QUEUE_BYTES) return
+        try {
+            val e0 = System.currentTimeMillis()
+            val baos = java.io.ByteArrayOutputStream()
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos)
+            val encodeMs = System.currentTimeMillis() - e0
+            sentAtMs = System.currentTimeMillis()
+            lastEncodeMs = encodeMs
+            ws.send(baos.toByteArray().toByteString())
         } catch (e: Exception) {
             Log.e(TAG, "전송 에러: ${e.message}")
         }

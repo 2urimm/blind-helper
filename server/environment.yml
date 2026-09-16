@@ -1,0 +1,16 @@
+name: blind-helper
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - fastapi==0.115.6
+      - "uvicorn[standard]==0.34.0"
+      - websockets==14.1
+      - opencv-python==4.10.0.84
+      - ultralytics==8.3.55
+      - numpy==1.26.4
+      - transformers==5.17.0
+      - pillow==12.3.0
+      - openvino==2024.6.0

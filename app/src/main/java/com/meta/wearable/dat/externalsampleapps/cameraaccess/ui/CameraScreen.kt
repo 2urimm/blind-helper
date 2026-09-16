@@ -90,6 +90,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.Detection
 import androidx.compose.ui.graphics.toArgb
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.camera.InferenceMode
 
 // Scrims behind the top/bottom bars so the white controls stay legible over the live feed. Hoisted
 // so they're allocated once instead of on every bar recomposition (the recording timer ticks).
@@ -156,6 +157,7 @@ fun CameraScreen(
             activity?.let { wearablesViewModel.startUnregistration(it) }
             showSettingsMenu = false
           },
+          onSelectMode = cameraViewModel::setInferenceMode,
       )
 
       Spacer(modifier = Modifier.weight(1f))
@@ -355,6 +357,7 @@ private fun TopBar(
     showSettingsMenu: Boolean,
     onToggleSettings: () -> Unit,
     onDisconnect: () -> Unit,
+    onSelectMode: (InferenceMode) -> Unit,
 ) {
   Row(
       modifier =
@@ -377,6 +380,7 @@ private fun TopBar(
           active = ui.isStreaming,
           present = ui.hasStream,
       )
+        ModeToggle(current = ui.inferenceMode, onSelect = onSelectMode)
     }
 
     Spacer(modifier = Modifier.weight(1f))
@@ -762,6 +766,39 @@ private fun DetectionOverlay(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ModeToggle(
+    current: InferenceMode,
+    onSelect: (InferenceMode) -> Unit,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        ModeChip("OFF", current == InferenceMode.OFF) { onSelect(InferenceMode.OFF) }
+        ModeChip("온디바이스", current == InferenceMode.ON_DEVICE) { onSelect(InferenceMode.ON_DEVICE) }
+        ModeChip("서버", current == InferenceMode.SERVER) { onSelect(InferenceMode.SERVER) }
+    }
+}
+
+@Composable
+private fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier =
+            Modifier.clip(RoundedCornerShape(percent = 50))
+                .background(
+                    if (selected) Color.White.copy(alpha = 0.9f)
+                    else Color.White.copy(alpha = 0.15f)
+                )
+                .clickable(onClick = onClick)
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Text(
+            text = label,
+            color = if (selected) Color.Black else Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 

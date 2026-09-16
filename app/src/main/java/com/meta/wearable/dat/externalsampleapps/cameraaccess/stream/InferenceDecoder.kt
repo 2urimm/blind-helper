@@ -30,11 +30,16 @@ import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.camera.InferenceMode
 
 class InferenceDecoder(
   context: Context,
+  private val serverUrl: String,
   private val onDetections: (List<Detection>) -> Unit,
 ) {
+  // 서버 모드에서 쓸 전송기 (지연 생성)
+  private var frameSender: FrameSender? = null
+  @Volatile var mode: InferenceMode = InferenceMode.ON_DEVICE
 
   companion object {
     private const val TAG = "InferenceDecoder"
@@ -83,17 +88,25 @@ class InferenceDecoder(
               { reader ->
                 val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
                 try {
-                  // 이전 추론이 진행 중이면 이 프레임은 버림 (최신 우선)
                   if (inferring.compareAndSet(false, true)) {
                     val bmp = yuvToBitmap(image)
                     inferHandler.post {
                       try {
                         if (bmp != null) {
-                          val dets = yolo.detect(bmp)
-                          onDetections(dets)
+                          when (mode) {
+                            InferenceMode.ON_DEVICE -> {
+                              val dets = yolo.detect(bmp)
+                              onDetections(dets)
+                            }
+                            InferenceMode.SERVER -> {
+                              frameSender?.sendFrameForMetrics(bmp)
+                              onDetections(emptyList()) // 서버 모드는 폰 박스 안 그림(로그로 측정)
+                            }
+                            InferenceMode.OFF -> {}
+                          }
                         }
                       } catch (e: Exception) {
-                        Log.e(TAG, "추론 에러: ${e.message}")
+                        Log.e(TAG, "처리 에러: ${e.message}")
                       } finally {
                         inferring.set(false)
                       }
@@ -158,6 +171,16 @@ class InferenceDecoder(
       index = findNalUnit(writableByteArray, index + 1, data.size, prefixFlags)
     }
   }
+  fun connectServer() {
+    if (frameSender == null) {
+      frameSender = FrameSender(serverUrl).also { it.connect() }
+    }
+  }
+
+  fun disconnectServer() {
+    frameSender?.close()
+    frameSender = null
+  }
 
   fun stop() {
     active = false
@@ -178,6 +201,8 @@ class InferenceDecoder(
     imageReader = null
     inferThread.quitSafely()
     yolo.close()
+    frameSender?.close()
+    frameSender = null
   }
 
   private fun enqueuePublic(buffer: ByteBuffer) {

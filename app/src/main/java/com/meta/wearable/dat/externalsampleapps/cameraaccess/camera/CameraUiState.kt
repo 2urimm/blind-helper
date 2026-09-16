@@ -18,6 +18,9 @@ import android.net.Uri
 import com.meta.wearable.dat.camera.types.StreamState
 import com.meta.wearable.dat.core.session.DeviceSessionState
 
+/** 추론 경로 모드 */
+enum class InferenceMode { OFF, ON_DEVICE, SERVER }
+
 /** A capture awaiting preview/share — a still photo or a recorded video file. */
 sealed interface CapturePreview {
   data class Photo(val bitmap: Bitmap) : CapturePreview
@@ -47,6 +50,7 @@ data class CameraUiState(
     // i.e. while the camera-permission check runs. Folded into isBusy so the Preview button stays
     // disabled for the whole flow, closing the gap where the SDK state machine hasn't moved yet.
     val isStartingStream: Boolean = false,
+    val inferenceMode: InferenceMode = InferenceMode.OFF,
 ) {
   /** A session exists and is connected (or connecting); a stream can be started. */
   val hasSession: Boolean

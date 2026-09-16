@@ -63,6 +63,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.InferenceDecoder
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.Detection
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.camera.InferenceMode
 
 class CameraViewModel(
     application: Application,
@@ -74,6 +75,8 @@ class CameraViewModel(
     private const val FRAME_RATE = 24
     private const val KEYFRAME_WAIT_STEP_MS = 25L
     private const val KEYFRAME_WAIT_MAX_MS = 500L
+    private const val SERVER_URL = "ws://192.168.23.190:8000/stream"
+
   }
 
   private val deviceSelector: DeviceSelector = wearablesViewModel.deviceSelector
@@ -157,6 +160,18 @@ class CameraViewModel(
         hevcDecoder = null
       }
     }
+  }
+
+  fun setInferenceMode(newMode: InferenceMode) {
+    _uiState.update { it.copy(inferenceMode = newMode) }
+    synchronized(decoderLock) {
+      inferenceDecoder?.mode = newMode
+      when (newMode) {
+        InferenceMode.SERVER -> inferenceDecoder?.connectServer()
+        else -> inferenceDecoder?.disconnectServer()
+      }
+    }
+    if (newMode != InferenceMode.ON_DEVICE) _detections.value = emptyList()
   }
 
   // MARK: - Lifecycle step 1: session
@@ -393,10 +408,13 @@ class CameraViewModel(
         inferenceDecoder =
           InferenceDecoder(
             getApplication(),
+            serverUrl = SERVER_URL,
             onDetections = { dets -> _detections.value = dets },
           ).also { dec ->
+            dec.mode = _uiState.value.inferenceMode
             dec.start(width, height)
             csdCollector.complete()?.let { dec.decodeFrame(it, 0) }
+            if (_uiState.value.inferenceMode == InferenceMode.SERVER) dec.connectServer()
           }
       }
       inferenceDecoder?.decodeFrame(byteArray, presentationTimeUs)
