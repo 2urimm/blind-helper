@@ -1,10 +1,13 @@
 """
-Blind Helper - 경로 B 서버 (구간측정 + 단안 Depth 추론)
+Blind Helper - 경로 B 서버 (YOLO + Metric Depth, 박스별 절대거리 + 폰 회신)
 
-YOLO(객체) + Depth Anything V2(깊이) 동시 추론. 구간별 시간 측정.
-Depth는 무거우므로 DEPTH_EVERY_N 프레임마다 한 번만 (노트북 CPU 대비).
+YOLO로 객체 탐지 → 각 박스 중심의 metric depth 값(미터)을 읽어
+"라벨 + 거리(m)"를 폰으로 회신. 폰이 프리뷰 위에 오버레이.
 
-측정: decode_ms / yolo_ms / depth_ms / server_ms → 응답으로 폰에 전달
+Metric Depth 모델: 절대 거리(미터) 추정.
+  실내: depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf
+  실외: depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf
+
 종료: Ctrl+C
 """
 
@@ -26,13 +29,15 @@ CONF_THRES = 0.4
 IMG_SIZE = 480
 SHOW_WINDOW = True
 TORCH_THREADS = 4
-USE_OPENVINO = True     # GPU면 False
-USE_GPU = False         # GPU 컴퓨터면 True
+USE_OPENVINO = True
+USE_GPU = True                # GPU 컴퓨터: True
 
-# --- Depth 설정 ---
-USE_DEPTH = True                          # depth 추론 켜기
-DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
-DEPTH_EVERY_N = 5                         # N프레임마다 1번만 depth (CPU 부담↓). GPU면 1로.
+# Depth (metric, 미터 단위)
+USE_DEPTH = True
+# 실내/실외 전환: 아래 둘 중 하나 주석 해제 (각각 측정)
+DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"   # 실내
+# DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf"  # 실외
+DEPTH_EVERY_N = 1            # GPU면 1 (매 프레임)
 
 if USE_GPU:
     USE_OPENVINO = False
@@ -66,24 +71,19 @@ _predict_kwargs = dict(imgsz=IMG_SIZE, conf=CONF_THRES, verbose=False)
 if USE_GPU:
     _predict_kwargs["device"] = 0
 
-# --- Depth 모델 로드 ---
 depth_pipe = None
 if USE_DEPTH:
-    print("Depth Anything V2 로딩 중... (최초 다운로드 시 오래 걸림)")
+    print(f"Metric Depth 로딩 중... ({DEPTH_MODEL})")
     try:
         from transformers import pipeline as hf_pipeline
-        depth_device = 0 if USE_GPU else -1   # -1=CPU, 0=첫 GPU
-        depth_pipe = hf_pipeline(
-            task="depth-estimation",
-            model=DEPTH_MODEL,
-            device=depth_device,
-        )
+        depth_device = 0 if USE_GPU else -1
+        depth_pipe = hf_pipeline(task="depth-estimation", model=DEPTH_MODEL, device=depth_device)
         print("Depth 모델 로드 완료.")
     except Exception as e:
         print(f"Depth 로드 실패 ({e}) -> depth 없이 진행")
         depth_pipe = None
 
-print(f"모델 로드 완료 (openvino={using_openvino}, gpu={USE_GPU}, depth={depth_pipe is not None}). 폰 연결 대기 중...")
+print(f"모델 로드 완료 (gpu={USE_GPU}, depth={depth_pipe is not None}). 폰 연결 대기 중...")
 
 _lock = threading.Lock()
 _latest = {"data": None, "recv_ms": 0.0}
@@ -92,28 +92,31 @@ _result_lock = threading.Lock()
 _pending_result = {"json": None}
 latest_view = {"annotated": None}
 proc_times = deque(maxlen=30)
-_frame_idx = 0
-_last_depth_ms = 0.0
 
 
-def run_depth(frame_bgr):
-    """BGR numpy → depth 추론 → (추론시간ms, 컬러맵 depth 이미지)"""
+def run_metric_depth(frame_bgr):
+    """BGR → metric depth(미터) 맵(numpy, HxW), 추론시간ms, 컬러맵"""
     from PIL import Image
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     pil = Image.fromarray(rgb)
     t0 = time.time()
     out = depth_pipe(pil)
     depth_ms = (time.time() - t0) * 1000
-    # depth: PIL 이미지(그레이). 컬러맵으로 시각화
-    depth_np = np.array(out["depth"])
-    depth_norm = cv2.normalize(depth_np, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    depth_color = cv2.applyColorMap(depth_norm, cv2.COLORMAP_INFERNO)
-    depth_color = cv2.resize(depth_color, (frame_bgr.shape[1], frame_bgr.shape[0]))
-    return depth_ms, depth_color
+    # metric 모델: predicted_depth가 미터 단위. out["depth"]는 시각화용 PIL.
+    # predicted_depth 텐서를 미터맵으로 사용.
+    depth_m = out["predicted_depth"].squeeze().cpu().numpy()  # HxW, 미터
+    # 원본 프레임 크기로 리사이즈 (박스 좌표와 맞추기 위해)
+    depth_m = cv2.resize(depth_m, (frame_bgr.shape[1], frame_bgr.shape[0]))
+    # 시각화
+    dnorm = cv2.normalize(depth_m, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    depth_color = cv2.applyColorMap(dnorm, cv2.COLORMAP_INFERNO)
+    return depth_ms, depth_m, depth_color
 
 
 def inference_worker():
-    global _frame_idx, _last_depth_ms
+    frame_idx = 0
+    last_depth_ms = 0.0
+    last_depth_m = None
     while not _stop.is_set():
         with _lock:
             data = _latest["data"]
@@ -131,6 +134,7 @@ def inference_worker():
         decode_ms = (time.time() - d0) * 1000
         if frame is None:
             continue
+        H, W = frame.shape[:2]
 
         # YOLO
         i0 = time.time()
@@ -139,28 +143,49 @@ def inference_worker():
         r = results[0]
         annotated = r.plot()
 
-        # Depth (N프레임마다)
-        depth_ms = 0.0
+        # Metric Depth
         depth_color = None
-        _frame_idx += 1
-        if depth_pipe is not None and _frame_idx % DEPTH_EVERY_N == 0:
+        frame_idx += 1
+        if depth_pipe is not None and frame_idx % DEPTH_EVERY_N == 0:
             try:
-                depth_ms, depth_color = run_depth(frame)
-                _last_depth_ms = depth_ms
+                last_depth_ms, last_depth_m, depth_color = run_metric_depth(frame)
             except Exception as e:
                 print(f"\ndepth 에러: {e}")
 
-        server_ms = (time.time() - server_t0) * 1000
+        # 각 박스 중심의 거리(미터) 계산 → 폰으로 보낼 detection 목록
+        dets = []
+        for b in r.boxes:
+            cls = int(b.cls[0]); conf = float(b.conf[0])
+            x1, y1, x2, y2 = b.xyxy[0].tolist()
+            cx = int((x1 + x2) / 2); cy = int((y1 + y2) / 2)
+            dist_m = None
+            if last_depth_m is not None and 0 <= cy < H and 0 <= cx < W:
+                # 박스 중심 주변 작은 패치의 중앙값(노이즈 완화)
+                y0 = max(0, cy - 3); yb = min(H, cy + 4)
+                x0 = max(0, cx - 3); xb = min(W, cx + 4)
+                patch = last_depth_m[y0:yb, x0:xb]
+                if patch.size > 0:
+                    dist_m = float(np.median(patch))
+            dets.append({
+                "label": model.names[cls],
+                "conf": round(conf, 2),
+                # 좌표는 원본 프레임(WxH) 기준 → 폰이 화면 크기로 스케일
+                "box": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
+                "dist": round(dist_m, 2) if dist_m is not None else None,
+            })
+            # 뷰어에 거리 표시
+            if dist_m is not None:
+                cv2.putText(annotated, f"{dist_m:.1f}m", (int(x1), int(y2) - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-        dets = [{"label": model.names[int(b.cls[0])], "conf": round(float(b.conf[0]), 2)}
-                for b in r.boxes]
+        server_ms = (time.time() - server_t0) * 1000
 
         result_json = json.dumps({
             "server_ms": round(server_ms, 1),
-            "decode_ms": round(decode_ms, 1),
             "yolo_ms": round(yolo_ms, 1),
-            "depth_ms": round(_last_depth_ms, 1),
-            "n": len(dets),
+            "depth_ms": round(last_depth_ms, 1),
+            "frame_w": W, "frame_h": H,
+            "dets": dets,
         })
         with _result_lock:
             _pending_result["json"] = result_json
@@ -173,18 +198,13 @@ def inference_worker():
                 fps = (len(proc_times) - 1) / span
 
         lag_ms = time.time() * 1000 - recv_ms
-        info = (f"fps={fps:4.1f} server={server_ms:6.1f}ms "
-                f"(dec={decode_ms:4.1f} yolo={yolo_ms:5.1f} depth={_last_depth_ms:6.1f}) "
-                f"lag={lag_ms:6.1f}ms objs={len(dets)}")
-        print(info, end="\r")
+        print(f"fps={fps:4.1f} server={server_ms:6.1f}ms (yolo={yolo_ms:5.1f} depth={last_depth_ms:6.1f}) "
+              f"lag={lag_ms:6.1f}ms objs={len(dets)}", end="\r")
 
-        # 뷰어: YOLO 박스 + depth를 나란히
         if depth_color is not None:
             combined = np.hstack([annotated, depth_color])
         else:
             combined = annotated
-        cv2.putText(combined, f"server={server_ms:.0f}ms yolo={yolo_ms:.0f} depth={_last_depth_ms:.0f} fps={fps:.1f}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         latest_view["annotated"] = combined
 
 
@@ -215,7 +235,7 @@ async def viewer():
     while True:
         img = latest_view["annotated"]
         if img is not None:
-            cv2.imshow("Blind Helper - YOLO + Depth", img)
+            cv2.imshow("Blind Helper - YOLO + Metric Depth", img)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 cv2.destroyAllWindows()
         await asyncio.sleep(0.01)
