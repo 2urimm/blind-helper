@@ -75,7 +75,7 @@ class CameraViewModel(
     private const val FRAME_RATE = 24
     private const val KEYFRAME_WAIT_STEP_MS = 25L
     private const val KEYFRAME_WAIT_MAX_MS = 500L
-    private const val SERVER_URL = "ws://192.168.23.190:8000/stream"
+    private const val SERVER_URL = "ws://192.168.0.124:8001/stream"
 
   }
 
