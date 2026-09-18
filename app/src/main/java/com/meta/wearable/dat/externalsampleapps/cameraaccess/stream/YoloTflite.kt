@@ -31,6 +31,7 @@ data class Detection(
     val top: Float,
     val right: Float,
     val bottom: Float,
+    val dist: Float? = null,   // 서버 metric depth 거리(m). 온디바이스는 null
 )
 
 class YoloTflite(context: Context) {

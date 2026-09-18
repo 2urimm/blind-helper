@@ -16,8 +16,10 @@ import okio.ByteString.Companion.toByteString
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
-class FrameSender(private val serverUrl: String) {
-
+class FrameSender(
+    private val serverUrl: String,
+    private val onServerResult: (List<Detection>, Int, Int) -> Unit = { _, _, _ -> },
+) {
     companion object {
         private const val TAG = "FrameSender"
         private const val JPEG_QUALITY = 60   // 낮을수록 대역폭 적게 먹음 (40~70 조절)
@@ -66,6 +68,14 @@ class FrameSender(private val serverUrl: String) {
                                 "network=${"%.0f".format(avgNet)}ms  encode=${lastEncodeMs}ms  → 병목:${if (avgNet > avgServer) "네트워크" else "서버추론"}")
                     netCount = 0; netSumRtt = 0.0; netSumServer = 0.0
                     lastNetLogMs = now
+                }
+                // 박스+거리 파싱 → 오버레이용 콜백
+                try {
+                    val fw = Regex("\"frame_w\":\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    val fh = Regex("\"frame_h\":\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    onServerResult(parseDets(text), fw, fh)
+                } catch (e: Exception) {
+                    Log.e(TAG, "파싱 에러: ${e.message}")
                 }
             }
 
@@ -129,6 +139,23 @@ class FrameSender(private val serverUrl: String) {
         } catch (e: Exception) {
             Log.e(TAG, "전송 에러: ${e.message}")
         }
+    }
+
+    private fun parseDets(text: String): List<Detection> {
+        val result = mutableListOf<Detection>()
+        val detsBlock = Regex("\"dets\":\\s*\\[(.*)\\]", RegexOption.DOT_MATCHES_ALL)
+            .find(text)?.groupValues?.get(1) ?: return result
+        for (m in Regex("\\{[^}]*\\}").findAll(detsBlock)) {
+            val o = m.value
+            val label = Regex("\"label\":\\s*\"([^\"]*)\"").find(o)?.groupValues?.get(1) ?: continue
+            val conf = Regex("\"conf\":\\s*([0-9.]+)").find(o)?.groupValues?.get(1)?.toFloatOrNull() ?: 0f
+            val box = Regex("\"box\":\\s*\\[([^\\]]*)\\]").find(o)?.groupValues?.get(1) ?: continue
+            val nums = box.split(",").mapNotNull { it.trim().toFloatOrNull() }
+            if (nums.size < 4) continue
+            val dist = Regex("\"dist\":\\s*([0-9.]+)").find(o)?.groupValues?.get(1)?.toFloatOrNull()
+            result.add(Detection(label, conf, nums[0], nums[1], nums[2], nums[3], dist))
+        }
+        return result
     }
 
     fun close() {

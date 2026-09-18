@@ -91,6 +91,8 @@ import androidx.compose.ui.graphics.nativeCanvas
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.Detection
 import androidx.compose.ui.graphics.toArgb
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.camera.InferenceMode
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.LaunchedEffect
 
 // Scrims behind the top/bottom bars so the white controls stay legible over the live feed. Hoisted
 // so they're allocated once instead of on every bar recomposition (the recording timer ticks).
@@ -116,6 +118,7 @@ fun CameraScreen(
   val ui by cameraViewModel.uiState.collectAsStateWithLifecycle()
   val wearablesUi by wearablesViewModel.uiState.collectAsStateWithLifecycle()
     val detections by cameraViewModel.detections.collectAsStateWithLifecycle()
+    val serverFrameSize by cameraViewModel.serverFrameSize.collectAsStateWithLifecycle()
   val activity = LocalActivity.current
   var showSettingsMenu by remember { mutableStateOf(false) }
 
@@ -131,7 +134,11 @@ fun CameraScreen(
 
       // YOLO 박스 오버레이 (프리뷰 위, 컨트롤 아래)
       if (ui.hasStream) {
-          DetectionOverlay(detections = detections, modifier = Modifier.fillMaxSize())
+          DetectionOverlay(
+              detections = detections,
+              serverFrameSize = serverFrameSize,
+              modifier = Modifier.fillMaxSize(),
+          )
       }
 
     // Tap outside the open settings menu dismisses it.
@@ -729,46 +736,63 @@ private fun UpdateRequiredMessage(modifier: Modifier = Modifier) {
 @Composable
 private fun DetectionOverlay(
     detections: List<Detection>,
+    serverFrameSize: Pair<Int, Int>,
     modifier: Modifier = Modifier,
 ) {
-    val INPUT = 320f
     Canvas(modifier = modifier) {
-        val sx = size.width / INPUT
-        val sy = size.height / INPUT
+        val (fw, fh) = serverFrameSize
+        val baseW = if (fw > 0) fw.toFloat() else 320f
+        val baseH = if (fh > 0) fh.toFloat() else 320f
+        val sx = size.width / baseW
+        val sy = size.height / baseH
+
         detections.forEach { d ->
             val left = d.left * sx
             val top = d.top * sy
             val right = d.right * sx
             val bottom = d.bottom * sy
-
             val boxColor = colorForLabel(d.label)
 
-            // 박스
             drawRect(
                 color = boxColor,
                 topLeft = Offset(left, top),
                 size = Size(right - left, bottom - top),
                 style = Stroke(width = 4f),
             )
-            // 라벨 텍스트 (박스와 같은 색)
             drawContext.canvas.nativeCanvas.apply {
-                val paint =
-                    android.graphics.Paint().apply {
-                        color = boxColor.toArgb()
-                        textSize = 36f
-                        isFakeBoldText = true
-                    }
-                drawText(
-                    "${d.label} ${"%.2f".format(d.score)}",
-                    left,
-                    (top - 8f).coerceAtLeast(36f),
-                    paint,
-                )
+                val paint = android.graphics.Paint().apply {
+                    color = boxColor.toArgb()
+                    textSize = 36f
+                    isFakeBoldText = true
+                }
+                drawText("${d.label} ${"%.2f".format(d.score)}", left, (top - 8f).coerceAtLeast(36f), paint)
+                d.dist?.let { dm ->
+                    drawText("${"%.1f".format(dm)}m", left, bottom + 34f, paint)
+                }
             }
         }
     }
 }
+// 박스 하나의 현재 위치 + 목표 위치를 들고, step()마다 목표로 조금씩 이동
+private class AnimatedBox(
+    var curLeft: Float, var curTop: Float, var curRight: Float, var curBottom: Float,
+    var det: Detection,
+) {
+    private var tLeft = curLeft; private var tTop = curTop
+    private var tRight = curRight; private var tBottom = curBottom
 
+    fun target(d: Detection) {
+        tLeft = d.left; tTop = d.top; tRight = d.right; tBottom = d.bottom
+        det = d
+    }
+    fun step() {
+        val a = 0.3f  // 0~1, 클수록 빨리 따라감(덜 부드럽), 작을수록 부드럽(더 지연)
+        curLeft += (tLeft - curLeft) * a
+        curTop += (tTop - curTop) * a
+        curRight += (tRight - curRight) * a
+        curBottom += (tBottom - curBottom) * a
+    }
+}
 @Composable
 private fun ModeToggle(
     current: InferenceMode,

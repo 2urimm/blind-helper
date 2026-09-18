@@ -64,6 +64,7 @@ import kotlinx.coroutines.withContext
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.InferenceDecoder
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.Detection
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.camera.InferenceMode
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.ObstacleAlarm
 
 class CameraViewModel(
     application: Application,
@@ -75,7 +76,7 @@ class CameraViewModel(
     private const val FRAME_RATE = 24
     private const val KEYFRAME_WAIT_STEP_MS = 25L
     private const val KEYFRAME_WAIT_MAX_MS = 500L
-    private const val SERVER_URL = "ws://192.168.0.124:8001/stream"
+    private const val SERVER_URL = "ws://100.89.97.86:8001/stream"
 
   }
 
@@ -91,10 +92,15 @@ class CameraViewModel(
   private var session: DeviceSession? = null
   private var camera: Camera? = null
   private var stream: Stream? = null
+  // 서버 모드: 서버가 보낸 박스의 기준 프레임 크기 (좌표 스케일용). 0이면 온디바이스(320 기준)
+  private val _serverFrameSize = MutableStateFlow(0 to 0)
+  @Volatile private var lastServerResultMs = 0L
+  val serverFrameSize: StateFlow<Pair<Int, Int>> = _serverFrameSize.asStateFlow()
 
   // Recording pieces. The single compressed-HEVC stream feeds both the on-screen decoder and the
   // passthrough MP4 writer.
   private val audioInputHandler = AudioInputHandler(application)
+  private val obstacleAlarm = ObstacleAlarm(application)
   private val videoRecorder = VideoRecorder(application, viewModelScope)
 
   // Per-frame work (byte copy, NAL parsing, MediaMuxer writes, decoder feed) runs at frame rate and
@@ -172,6 +178,7 @@ class CameraViewModel(
       }
     }
     if (newMode != InferenceMode.ON_DEVICE) _detections.value = emptyList()
+    if (newMode != InferenceMode.SERVER) _serverFrameSize.value = 0 to 0
   }
 
   // MARK: - Lifecycle step 1: session
@@ -403,7 +410,6 @@ class CameraViewModel(
       }
       hevcDecoder?.decodeFrame(byteArray, presentationTimeUs)
 
-      // --- 경로 A(A-1): 추론 디코더도 같은 프레임을 받음 (Surface 불필요) ---
       if (inferenceDecoder == null) {
         inferenceDecoder =
           InferenceDecoder(
@@ -411,6 +417,21 @@ class CameraViewModel(
             serverUrl = SERVER_URL,
             onDetections = { dets -> _detections.value = dets },
           ).also { dec ->
+            dec.onServerResult = { dets, fw, fh ->
+              // 빈 결과(objs=0)여도 잠깐은 이전 박스 유지 → 깜빡임 완화
+              if (dets.isNotEmpty()) {
+                _detections.value = dets
+                _serverFrameSize.value = fw to fh
+                lastServerResultMs = System.currentTimeMillis()
+                obstacleAlarm.process(dets, fw)
+              } else {
+                // 마지막 결과가 온 지 오래됐으면(예: 1초) 비움, 아니면 유지
+                if (System.currentTimeMillis() - lastServerResultMs > 2000) {
+                  _detections.value = emptyList()
+                }
+                obstacleAlarm.process(emptyList(), fw)
+              }
+            }
             dec.mode = _uiState.value.inferenceMode
             dec.start(width, height)
             csdCollector.complete()?.let { dec.decodeFrame(it, 0) }
@@ -648,6 +669,7 @@ class CameraViewModel(
     cleanupSession()
     audioInputHandler.cleanup()
     videoRecorder.close()
+    obstacleAlarm.release()
   }
 
   class Factory(

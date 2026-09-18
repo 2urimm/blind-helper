@@ -100,7 +100,7 @@ class InferenceDecoder(
                             }
                             InferenceMode.SERVER -> {
                               frameSender?.sendFrameForMetrics(bmp)
-                              onDetections(emptyList()) // 서버 모드는 폰 박스 안 그림(로그로 측정)
+                              // 서버 결과는 onServerResult로만 그림. 여기서 _detections 건드리지 않음.
                             }
                             InferenceMode.OFF -> {}
                           }
@@ -171,9 +171,12 @@ class InferenceDecoder(
       index = findNalUnit(writableByteArray, index + 1, data.size, prefixFlags)
     }
   }
+  // 서버 결과를 밖으로 넘길 콜백 (ViewModel이 설정)
+  var onServerResult: (List<Detection>, Int, Int) -> Unit = { _, _, _ -> }
+
   fun connectServer() {
     if (frameSender == null) {
-      frameSender = FrameSender(serverUrl).also { it.connect() }
+      frameSender = FrameSender(serverUrl, onServerResult).also { it.connect() }
     }
   }
 
