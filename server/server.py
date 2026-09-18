@@ -25,11 +25,11 @@ from ultralytics import YOLO
 
 # 설정
 MODEL_PATH = "yolo11n.pt"
-CONF_THRES = 0.4
+CONF_THRES = 0.25
 IMG_SIZE = 480
 SHOW_WINDOW = True
 TORCH_THREADS = 4
-USE_OPENVINO = True
+USE_OPENVINO = False
 USE_GPU = True                # GPU 컴퓨터: True
 
 # Depth (metric, 미터 단위)
